@@ -1,0 +1,8 @@
+services:
+  jobbot:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./sources.yaml:/app/sources.yaml:ro
+    restart: unless-stopped

@@ -1,0 +1,40 @@
+# Job sources CareerPing polls. Edit this file and restart the bot to
+# change what it checks — no code changes needed.
+#
+# Why these sources: the big Israeli consumer job boards (AllJobs, Drushim,
+# LinkedIn) don't publish a free/official API, and scraping them is fragile
+# and against their terms of use. Greenhouse and Lever, on the other hand,
+# are applicant-tracking systems used directly by a large share of Israeli
+# tech companies, and both expose a free, unauthenticated, stable JSON API
+# for their public job boards. That's the reliable backbone here; RSS is
+# the escape hatch for anything else that publishes a feed.
+#
+# Finding a company's token:
+#   careers page "boards.greenhouse.io/<token>"    -> add <token> under greenhouse_boards
+#   careers page "jobs.lever.co/<company>"          -> add <company> under lever_boards
+# A wrong/renamed token just makes that one board return 404 — the bot logs
+# a warning and skips it, it won't crash the poller or the other sources.
+#
+# The list below is a *starting point* to verify/expand, not a guarantee —
+# double check these companies still use Greenhouse/Lever before relying on
+# them, and add the ones you actually care about.
+
+greenhouse_boards:
+  - wix
+  - fiverr
+  - riskified
+
+lever_boards:
+  - gong
+
+# Remotive: a free, global remote-jobs API (https://remotive.com/api-documentation).
+# Not Israel-specific, but many listings are open to Israel-based remote
+# candidates — per-user /setlocation and /setprofile filters narrow it down.
+remotive:
+  enabled: true
+  query: ""
+
+# Any RSS/Atom feed works here — a saved-search feed from a job board, a
+# company careers-page feed, an aggregator, etc.
+rss_feeds: []
+  # - "https://example.com/careers.rss"
