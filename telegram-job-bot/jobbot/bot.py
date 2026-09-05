@@ -3,9 +3,11 @@ from __future__ import annotations
 import logging
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.error import BadRequest
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 from .config import settings
+from .feedback import UP, parse_callback_data
 from .matching.llm import LLMMatcher
 from .models import UserProfile
 from .poller import fetch_all_jobs, notify_user, poll_once
@@ -16,12 +18,15 @@ logger = logging.getLogger(__name__)
 
 HELP_TEXT = (
     "I watch job boards and DM you postings that match your filters.\n\n"
+    "Tap 👍/👎 on any job I send — it teaches future matching what you actually "
+    "want, on top of these filters:\n\n"
     "Commands:\n"
     "/setkeywords python, backend, fintech — comma separated, matched against title/description\n"
     "/setlocation Tel Aviv (or \"remote\") — send with no text to clear\n"
     "/setprofile <free text> — describe what you're looking for in your own words; "
-    "an AI re-ranks keyword matches against this before you're notified\n"
+    "an AI re-ranks keyword matches against this (and your 👍/👎 history) before you're notified\n"
     "/status — show your current filters\n"
+    "/preferences — show how many jobs you've marked 👍/👎 so far\n"
     "/pause — stop notifications\n"
     "/resume — restart notifications\n"
     "/checknow — run a check for you right now, instead of waiting for the schedule\n"
@@ -99,6 +104,48 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text("\n".join(lines))
 
 
+async def cmd_preferences(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    storage: Storage = context.bot_data["storage"]
+    chat_id = update.effective_chat.id
+    ups, downs = await storage.get_feedback_counts(chat_id)
+    footer = (
+        "This shapes your future AI-ranked matches."
+        if settings.llm_enabled
+        else "Recorded, but AI re-ranking is off on this bot (no ANTHROPIC_API_KEY), so it isn't used to shape matches yet."
+    )
+    await update.message.reply_text(f"👍 Interested: {ups}\n👎 Skipped: {downs}\n\n{footer}")
+
+
+async def on_feedback_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles a 👍/👎 tap on a job message."""
+    query = update.callback_query
+    if query is None or query.message is None:
+        return
+
+    parsed = parse_callback_data(query.data)
+    if parsed is None:
+        await query.answer()
+        return
+    vote, token = parsed
+
+    storage: Storage = context.bot_data["storage"]
+    chat_id = query.message.chat_id
+    sent_job = await storage.get_sent_job(chat_id, token)
+    if sent_job is None:
+        # Bot data was reset, or this button is from a very old message.
+        await query.answer("This one's expired.")
+        return
+
+    await storage.record_feedback(chat_id, sent_job["job_uid"], vote)
+    toast = "Noted — more like this 👍" if vote == UP else "Noted — fewer like this 👎"
+    await query.answer(toast)
+
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except BadRequest:
+        pass  # message too old to edit, or already edited — the vote is recorded either way
+
+
 async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     storage: Storage = context.bot_data["storage"]
     user = await get_or_create_user(storage, update.effective_chat.id)
@@ -158,9 +205,11 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("setlocation", cmd_setlocation))
     application.add_handler(CommandHandler("setprofile", cmd_setprofile))
     application.add_handler(CommandHandler("status", cmd_status))
+    application.add_handler(CommandHandler("preferences", cmd_preferences))
     application.add_handler(CommandHandler("pause", cmd_pause))
     application.add_handler(CommandHandler("resume", cmd_resume))
     application.add_handler(CommandHandler("checknow", cmd_checknow))
+    application.add_handler(CallbackQueryHandler(on_feedback_callback, pattern=r"^fb:"))
 
     if application.job_queue is not None:
         application.job_queue.run_repeating(job_queue_poll, interval=settings.poll_interval_seconds, first=10)

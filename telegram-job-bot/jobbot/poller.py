@@ -4,10 +4,11 @@ import logging
 from html import escape
 from typing import List, Optional, Tuple
 
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden
 
+from .feedback import DOWN, UP, callback_data, make_token
 from .matching.keyword import keyword_match
 from .matching.llm import LLMMatcher
 from .models import Job, UserProfile
@@ -41,6 +42,39 @@ def format_job_message(job: Job, reason: Optional[str] = None) -> str:
     return "\n".join(lines)
 
 
+def build_feedback_keyboard(chat_id: int, job_uid: str) -> InlineKeyboardMarkup:
+    token = make_token(chat_id, job_uid)
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("👍 Interested", callback_data=callback_data(UP, token)),
+                InlineKeyboardButton("👎 Skip", callback_data=callback_data(DOWN, token)),
+            ]
+        ]
+    )
+
+
+async def build_feedback_context(storage: Storage, chat_id: int, limit: int = 12) -> str:
+    """A short summary of a user's past 👍/👎 votes, for the LLM prompt.
+
+    Empty string (not None) when there's no feedback yet, so callers can
+    always safely include it.
+    """
+    recent = await storage.get_recent_feedback(chat_id, limit=limit)
+    if not recent:
+        return ""
+
+    liked = [f"{r['title']} at {r['company']}" for r in recent if r["vote"] == UP]
+    disliked = [f"{r['title']} at {r['company']}" for r in recent if r["vote"] == DOWN]
+
+    lines = []
+    if liked:
+        lines.append("Marked INTERESTED in: " + "; ".join(liked))
+    if disliked:
+        lines.append("Marked NOT INTERESTED in: " + "; ".join(disliked))
+    return "\n".join(lines)
+
+
 async def notify_user(
     bot: Bot,
     storage: Storage,
@@ -59,7 +93,8 @@ async def notify_user(
 
     to_send: List[Tuple[Job, Optional[str]]]
     if user.profile_text and llm is not None and unseen:
-        to_send = list(await llm.filter_relevant(unseen, user.profile_text))
+        feedback_context = await build_feedback_context(storage, user.chat_id)
+        to_send = list(await llm.filter_relevant(unseen, user.profile_text, feedback_context))
     else:
         to_send = [(job, None) for job in unseen]
 
@@ -70,6 +105,7 @@ async def notify_user(
                 chat_id=user.chat_id,
                 text=format_job_message(job, reason),
                 parse_mode=ParseMode.HTML,
+                reply_markup=build_feedback_keyboard(user.chat_id, job.uid),
                 disable_web_page_preview=False,
             )
         except Forbidden:
@@ -82,7 +118,7 @@ async def notify_user(
             continue
         else:
             sent += 1
-            await storage.mark_sent(user.chat_id, job.uid)
+            await storage.mark_sent(user.chat_id, job, make_token(user.chat_id, job.uid))
     return sent
 
 

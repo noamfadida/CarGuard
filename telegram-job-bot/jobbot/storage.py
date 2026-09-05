@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from .models import UserProfile
+from .models import Job, UserProfile
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -23,7 +23,23 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS sent_jobs (
     chat_id INTEGER NOT NULL,
     job_uid TEXT NOT NULL,
+    token TEXT,
+    title TEXT NOT NULL DEFAULT '',
+    company TEXT NOT NULL DEFAULT '',
+    location TEXT NOT NULL DEFAULT '',
     sent_at TEXT NOT NULL,
+    PRIMARY KEY (chat_id, job_uid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sent_jobs_token ON sent_jobs(token);
+
+-- One row per (chat, job): a later vote on the same job overwrites the
+-- earlier one rather than creating a second row.
+CREATE TABLE IF NOT EXISTS job_feedback (
+    chat_id INTEGER NOT NULL,
+    job_uid TEXT NOT NULL,
+    vote TEXT NOT NULL,
+    created_at TEXT NOT NULL,
     PRIMARY KEY (chat_id, job_uid)
 );
 """
@@ -44,7 +60,26 @@ class Storage:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self.db_path)) as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
             conn.commit()
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Add columns introduced after a db file may already exist on disk.
+
+        SCHEMA's CREATE TABLE already has these for a fresh db; this only
+        matters for a sent_jobs table created before the feedback feature
+        existed.
+        """
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(sent_jobs)")}
+        for column, ddl in (
+            ("token", "ALTER TABLE sent_jobs ADD COLUMN token TEXT"),
+            ("title", "ALTER TABLE sent_jobs ADD COLUMN title TEXT NOT NULL DEFAULT ''"),
+            ("company", "ALTER TABLE sent_jobs ADD COLUMN company TEXT NOT NULL DEFAULT ''"),
+            ("location", "ALTER TABLE sent_jobs ADD COLUMN location TEXT NOT NULL DEFAULT ''"),
+        ):
+            if column not in existing:
+                conn.execute(ddl)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -102,13 +137,75 @@ class Storage:
             ).fetchone()
             return row is not None
 
-    def _mark_sent_sync(self, chat_id: int, job_uid: str) -> None:
+    def _mark_sent_sync(self, chat_id: int, job: Job, token: str) -> None:
         with closing(self._connect()) as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO sent_jobs (chat_id, job_uid, sent_at) VALUES (?, ?, ?)",
-                (chat_id, job_uid, datetime.now(timezone.utc).isoformat()),
+                """
+                INSERT OR IGNORE INTO sent_jobs (chat_id, job_uid, token, title, company, location, sent_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    chat_id,
+                    job.uid,
+                    token,
+                    job.title,
+                    job.company,
+                    job.location,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
             )
             conn.commit()
+
+    def _get_sent_job_sync(self, chat_id: int, token: str) -> Optional[dict]:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT job_uid, title, company, location FROM sent_jobs WHERE chat_id = ? AND token = ?",
+                (chat_id, token),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def _record_feedback_sync(self, chat_id: int, job_uid: str, vote: str) -> None:
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """
+                INSERT INTO job_feedback (chat_id, job_uid, vote, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(chat_id, job_uid) DO UPDATE SET
+                    vote = excluded.vote,
+                    created_at = excluded.created_at
+                """,
+                (chat_id, job_uid, vote, datetime.now(timezone.utc).isoformat()),
+            )
+            conn.commit()
+
+    def _get_recent_feedback_sync(self, chat_id: int, limit: int) -> List[dict]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT f.vote AS vote, s.title AS title, s.company AS company
+                FROM job_feedback f
+                JOIN sent_jobs s ON s.chat_id = f.chat_id AND s.job_uid = f.job_uid
+                WHERE f.chat_id = ?
+                ORDER BY f.created_at DESC
+                LIMIT ?
+                """,
+                (chat_id, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def _get_feedback_counts_sync(self, chat_id: int) -> tuple[int, int]:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN vote = 'up' THEN 1 ELSE 0 END) AS ups,
+                    SUM(CASE WHEN vote = 'down' THEN 1 ELSE 0 END) AS downs
+                FROM job_feedback
+                WHERE chat_id = ?
+                """,
+                (chat_id,),
+            ).fetchone()
+            return (row["ups"] or 0, row["downs"] or 0)
 
     async def get_user(self, chat_id: int) -> Optional[UserProfile]:
         return await asyncio.to_thread(self._get_user_sync, chat_id)
@@ -122,5 +219,20 @@ class Storage:
     async def has_sent(self, chat_id: int, job_uid: str) -> bool:
         return await asyncio.to_thread(self._has_sent_sync, chat_id, job_uid)
 
-    async def mark_sent(self, chat_id: int, job_uid: str) -> None:
-        await asyncio.to_thread(self._mark_sent_sync, chat_id, job_uid)
+    async def mark_sent(self, chat_id: int, job: Job, token: str) -> None:
+        await asyncio.to_thread(self._mark_sent_sync, chat_id, job, token)
+
+    async def get_sent_job(self, chat_id: int, token: str) -> Optional[dict]:
+        """Resolve a feedback-button token back to the job it was sent for."""
+        return await asyncio.to_thread(self._get_sent_job_sync, chat_id, token)
+
+    async def record_feedback(self, chat_id: int, job_uid: str, vote: str) -> None:
+        await asyncio.to_thread(self._record_feedback_sync, chat_id, job_uid, vote)
+
+    async def get_recent_feedback(self, chat_id: int, limit: int = 12) -> List[dict]:
+        """Most recent (vote, title, company) rows for a user, newest first."""
+        return await asyncio.to_thread(self._get_recent_feedback_sync, chat_id, limit)
+
+    async def get_feedback_counts(self, chat_id: int) -> tuple[int, int]:
+        """(up_count, down_count) for a user."""
+        return await asyncio.to_thread(self._get_feedback_counts_sync, chat_id)

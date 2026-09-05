@@ -36,13 +36,17 @@ class LLMMatcher:
         self.model = model
 
     async def filter_relevant(
-        self, jobs: List[Job], profile_text: str, batch_size: int = 15
+        self,
+        jobs: List[Job],
+        profile_text: str,
+        feedback_context: str = "",
+        batch_size: int = 15,
     ) -> List[Tuple[Job, str]]:
         results: List[Tuple[Job, str]] = []
         for i in range(0, len(jobs), batch_size):
             batch = jobs[i : i + batch_size]
             try:
-                verdicts = await self._score_batch(batch, profile_text)
+                verdicts = await self._score_batch(batch, profile_text, feedback_context)
             except Exception:
                 logger.exception("LLM relevance scoring failed for a batch of %d jobs; skipping it", len(batch))
                 continue
@@ -54,7 +58,7 @@ class LLMMatcher:
                     results.append((job, str(verdict.get("reason", ""))))
         return results
 
-    async def _score_batch(self, jobs: List[Job], profile_text: str) -> list:
+    async def _score_batch(self, jobs: List[Job], profile_text: str, feedback_context: str) -> list:
         listing = [
             {
                 "id": job.uid,
@@ -65,10 +69,14 @@ class LLMMatcher:
             }
             for job in jobs
         ]
-        user_content = (
-            f"Candidate profile:\n{profile_text}\n\n"
-            f"Job postings (JSON):\n{json.dumps(listing, ensure_ascii=False)}"
-        )
+        parts = [f"Candidate profile:\n{profile_text}"]
+        if feedback_context:
+            parts.append(
+                "Additional signal from the candidate's past 👍/👎 reactions to previous "
+                f"postings - weigh this alongside their stated profile:\n{feedback_context}"
+            )
+        parts.append(f"Job postings (JSON):\n{json.dumps(listing, ensure_ascii=False)}")
+        user_content = "\n\n".join(parts)
         response = await self.client.messages.create(
             model=self.model,
             max_tokens=2048,

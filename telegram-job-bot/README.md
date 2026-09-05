@@ -24,14 +24,46 @@ sources are just config — extend it for any market.
        │ yes                              │ no
        ▼                                  ▼
   LLM relevance re-rank             send as-is
-       │
-       ▼
-  send matches via Telegram, record as sent
+  (also fed the user's                   │
+   past 👍/👎 history)                    │
+       │                                  │
+       └──────────────┬───────────────────┘
+                       ▼
+     send one job per message, with 👍 Interested / 👎 Skip
+     buttons, record as sent
+                       │
+              user taps a button
+                       ▼
+        vote recorded, buttons removed, fed into the
+           next poll's LLM re-ranking for that user
 ```
 
 The bot is a single long-running process: it polls Telegram for commands
 (`/start`, `/setkeywords`, ...) and, on a timer, polls the configured job
-sources and DMs each active user their new matches.
+sources and DMs each active user their new matches, one job per message.
+
+### The 👍/👎 feedback loop
+
+Every job message carries two inline buttons. Tapping one:
+
+- Records the vote (a second tap on a different job just adds another row —
+  votes are per-job, not global).
+- Removes the buttons and shows a small confirmation toast, so it's clear
+  the tap registered.
+- On the *next* poll cycle, if AI re-ranking is on (`/setprofile` set +
+  `ANTHROPIC_API_KEY` configured), the user's most recent votes are folded
+  into the prompt as extra signal alongside their stated profile — the
+  model is told what they've previously marked interesting vs. not.
+
+Without `/setprofile`/`ANTHROPIC_API_KEY`, votes are still recorded (see
+`/preferences`) but aren't yet used to shape matching — there's no
+keyword-only personalization heuristic, that would need its own design
+rather than being bolted on.
+
+A job's button `callback_data` never contains the job's own id — RSS job
+ids can be full URLs, well past Telegram's 64-byte callback_data limit —
+it carries a short hash (`jobbot/feedback.py:make_token`) that's looked
+back up against the `sent_jobs` table when tapped.
 
 ## Why these job sources
 
@@ -90,6 +122,7 @@ python main.py
 | `/setlocation Tel Aviv` | Location filter; use `remote` for remote-only, or send with no text to clear |
 | `/setprofile <free text>` | Describe what you want in your own words; the LLM re-ranks keyword matches against this |
 | `/status` | Shows your current filters and whether AI re-ranking is on |
+| `/preferences` | Shows how many jobs you've marked 👍/👎 so far |
 | `/pause` / `/resume` | Stop/restart notifications without losing your filters |
 | `/checknow` | Runs a check for you immediately, instead of waiting for the schedule |
 | `/help` | Shows the command list |
@@ -147,7 +180,8 @@ telegram-job-bot/
 ├── jobbot/
 │   ├── bot.py                # Telegram command handlers + polling job
 │   ├── poller.py              # fetch → filter → notify pipeline
-│   ├── storage.py             # SQLite: users, sent-job de-dup
+│   ├── storage.py             # SQLite: users, sent-job de-dup, feedback
+│   ├── feedback.py             # 👍/👎 vote constants + callback-token scheme
 │   ├── models.py               # Job, UserProfile
 │   ├── config.py                # env var loading
 │   ├── sources/                 # one module per source type
@@ -178,8 +212,10 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Tests cover the keyword filter, the `Job`/`UserProfile` models, and
-storage (SQLite round-trips, dedup). They don't hit the network — the
-`JobSource` implementations and the LLM re-ranker aren't covered by
-automated tests since they wrap third-party APIs; exercise those with
-`/checknow` against a real bot token once configured.
+Tests cover the keyword filter, the `Job`/`UserProfile` models, storage
+(SQLite round-trips, dedup, feedback), and the feedback token scheme
+(determinism, staying under Telegram's callback_data size limit even for
+a long RSS URL). They don't hit the network — the `JobSource`
+implementations and the LLM re-ranker aren't covered by automated tests
+since they wrap third-party APIs; exercise those with `/checknow` against
+a real bot token once configured.
