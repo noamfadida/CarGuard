@@ -10,6 +10,7 @@ from .config import settings
 from .feedback import UP, parse_callback_data
 from .matching.llm import LLMMatcher
 from .models import UserProfile
+from .personas import assign_persona, get_persona
 from .poller import fetch_all_jobs, notify_user, poll_once
 from .sources.registry import load_sources
 from .storage import Storage
@@ -43,9 +44,25 @@ async def get_or_create_user(storage: Storage, chat_id: int) -> UserProfile:
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Registers the user and greets them with their assigned /start persona.
+
+    New users get a persona assigned once, at random, and it's persisted -
+    this is the /start wording A/B test from the design doc. An existing
+    user from before this feature shipped gets one backfilled the first
+    time they hit /start again, rather than staying stuck with none.
+    """
     storage: Storage = context.bot_data["storage"]
-    await get_or_create_user(storage, update.effective_chat.id)
-    await update.message.reply_text("Hey! I'll DM you new job postings that match your filters.\n\n" + HELP_TEXT)
+    chat_id = update.effective_chat.id
+    user = await storage.get_user(chat_id)
+    if user is None:
+        user = UserProfile(chat_id=chat_id, persona=assign_persona().key)
+        await storage.upsert_user(user)
+    elif not user.persona:
+        user.persona = assign_persona().key
+        await storage.upsert_user(user)
+
+    persona = get_persona(user.persona)
+    await update.message.reply_text(f"{persona.start_line}\n\n{HELP_TEXT}")
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -114,6 +131,33 @@ async def cmd_preferences(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else "Recorded, but AI re-ranking is off on this bot (no ANTHROPIC_API_KEY), so it isn't used to shape matches yet."
     )
     await update.message.reply_text(f"👍 Interested: {ups}\n👎 Skipped: {downs}\n\n{footer}")
+
+
+async def cmd_variants(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin-only: activation rate per /start persona variant.
+
+    Restricted to ADMIN_CHAT_ID so the A/B test's internals aren't exposed
+    to everyone who happens to type the command.
+    """
+    chat_id = update.effective_chat.id
+    if settings.admin_chat_id is None or chat_id != settings.admin_chat_id:
+        await update.message.reply_text("This command isn't available.")
+        return
+
+    storage: Storage = context.bot_data["storage"]
+    stats = await storage.get_persona_stats()
+    if not stats:
+        await update.message.reply_text("No users yet.")
+        return
+
+    lines = ["Persona A/B — activation by variant:"]
+    for row in stats:
+        name = get_persona(row["persona"]).name if row["persona"] else "(unassigned)"
+        total = row["total"]
+        activated = row["activated"] or 0
+        pct = f" ({activated / total:.0%})" if total else ""
+        lines.append(f"• {name}: {activated}/{total} activated{pct}")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def on_feedback_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -209,6 +253,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("pause", cmd_pause))
     application.add_handler(CommandHandler("resume", cmd_resume))
     application.add_handler(CommandHandler("checknow", cmd_checknow))
+    application.add_handler(CommandHandler("variants", cmd_variants))
     application.add_handler(CallbackQueryHandler(on_feedback_callback, pattern=r"^fb:"))
 
     if application.job_queue is not None:

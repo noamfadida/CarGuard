@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS users (
     location TEXT NOT NULL DEFAULT '',
     profile_text TEXT NOT NULL DEFAULT '',
     active INTEGER NOT NULL DEFAULT 1,
+    persona TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 
@@ -81,6 +82,10 @@ class Storage:
             if column not in existing:
                 conn.execute(ddl)
 
+        existing_users = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+        if "persona" not in existing_users:
+            conn.execute("ALTER TABLE users ADD COLUMN persona TEXT NOT NULL DEFAULT ''")
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -94,6 +99,7 @@ class Storage:
             location=row["location"],
             profile_text=row["profile_text"],
             active=bool(row["active"]),
+            persona=row["persona"] if "persona" in row.keys() else "",
         )
 
     def _get_user_sync(self, chat_id: int) -> Optional[UserProfile]:
@@ -105,13 +111,14 @@ class Storage:
         with closing(self._connect()) as conn:
             conn.execute(
                 """
-                INSERT INTO users (chat_id, keywords, location, profile_text, active, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO users (chat_id, keywords, location, profile_text, active, persona, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(chat_id) DO UPDATE SET
                     keywords=excluded.keywords,
                     location=excluded.location,
                     profile_text=excluded.profile_text,
-                    active=excluded.active
+                    active=excluded.active,
+                    persona=excluded.persona
                 """,
                 (
                     user.chat_id,
@@ -119,6 +126,7 @@ class Storage:
                     user.location,
                     user.profile_text,
                     int(user.active),
+                    user.persona,
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
@@ -193,6 +201,31 @@ class Storage:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def _get_persona_stats_sync(self) -> List[dict]:
+        """Per persona variant: how many users got it, how many activated.
+
+        "Activated" here mirrors the design doc's definition - set at
+        least one filter or a profile - as a cheap proxy for engagement
+        while a small A/B group is still too little data for anything
+        more rigorous (real retention, application click-throughs, etc).
+        """
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    persona,
+                    COUNT(*) AS total,
+                    SUM(
+                        CASE WHEN keywords != '[]' OR location != '' OR profile_text != ''
+                        THEN 1 ELSE 0 END
+                    ) AS activated
+                FROM users
+                GROUP BY persona
+                ORDER BY persona
+                """
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def _get_feedback_counts_sync(self, chat_id: int) -> tuple[int, int]:
         with closing(self._connect()) as conn:
             row = conn.execute(
@@ -236,3 +269,7 @@ class Storage:
     async def get_feedback_counts(self, chat_id: int) -> tuple[int, int]:
         """(up_count, down_count) for a user."""
         return await asyncio.to_thread(self._get_feedback_counts_sync, chat_id)
+
+    async def get_persona_stats(self) -> List[dict]:
+        """[{persona, total, activated}, ...] across all users, one row per variant."""
+        return await asyncio.to_thread(self._get_persona_stats_sync)

@@ -112,3 +112,26 @@ def test_get_recent_feedback_includes_title_and_company(tmp_path):
 
     recent = run(storage.get_recent_feedback(1))
     assert recent == [{"vote": UP, "title": job.title, "company": job.company}]
+
+
+def test_persona_persists_across_roundtrip(tmp_path):
+    storage = Storage(str(tmp_path / "test.sqlite3"))
+    run(storage.upsert_user(UserProfile(chat_id=1, persona="tomer")))
+
+    fetched = run(storage.get_user(1))
+    assert fetched.persona == "tomer"
+
+
+def test_persona_stats_groups_by_variant_and_counts_activation(tmp_path):
+    storage = Storage(str(tmp_path / "test.sqlite3"))
+    # roni: one activated (has keywords), one not
+    run(storage.upsert_user(UserProfile(chat_id=1, persona="roni", keywords=["python"])))
+    run(storage.upsert_user(UserProfile(chat_id=2, persona="roni")))
+    # tomer: one activated (has a profile)
+    run(storage.upsert_user(UserProfile(chat_id=3, persona="tomer", profile_text="backend eng")))
+
+    stats = {row["persona"]: row for row in run(storage.get_persona_stats())}
+    assert stats["roni"]["total"] == 2
+    assert stats["roni"]["activated"] == 1
+    assert stats["tomer"]["total"] == 1
+    assert stats["tomer"]["activated"] == 1

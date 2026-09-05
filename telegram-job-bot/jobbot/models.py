@@ -38,3 +38,4 @@ class UserProfile:
     location: str = ""
     profile_text: str = ""
     active: bool = True
+    persona: str = ""  # which /start variant this user was assigned, see personas.py

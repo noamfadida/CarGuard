@@ -65,6 +65,21 @@ ids can be full URLs, well past Telegram's 64-byte callback_data limit —
 it carries a short hash (`jobbot/feedback.py:make_token`) that's looked
 back up against the `sent_jobs` table when tapped.
 
+### The /start persona A/B test
+
+Every new user is randomly assigned one of the persona variants in
+`jobbot/personas.py` (Roni / Tomer / Gali), and that assignment sticks —
+it's what the bot's very first message sounds like, and it's meant to be
+tested on a small real group rather than picked internally (see the
+design doc's "Naming" section for why). Set `ADMIN_CHAT_ID` in `.env` to
+your own Telegram chat id (from `@userinfobot`) to unlock `/variants`,
+which reports activation rate per variant — everyone else gets "this
+command isn't available."
+
+This only measures activation (did they set a filter), which is a coarse
+proxy — reading the actual small group's reactions still matters more
+than the numbers at this sample size.
+
 ## Why these job sources
 
 The big Israeli consumer job boards (AllJobs, Drushim, LinkedIn) don't
@@ -123,6 +138,7 @@ python main.py
 | `/setprofile <free text>` | Describe what you want in your own words; the LLM re-ranks keyword matches against this |
 | `/status` | Shows your current filters and whether AI re-ranking is on |
 | `/preferences` | Shows how many jobs you've marked 👍/👎 so far |
+| `/variants` | Admin-only (needs `ADMIN_CHAT_ID`): activation rate per `/start` persona variant |
 | `/pause` / `/resume` | Stop/restart notifications without losing your filters |
 | `/checknow` | Runs a check for you immediately, instead of waiting for the schedule |
 | `/help` | Shows the command list |
@@ -182,6 +198,7 @@ telegram-job-bot/
 │   ├── poller.py              # fetch → filter → notify pipeline
 │   ├── storage.py             # SQLite: users, sent-job de-dup, feedback
 │   ├── feedback.py             # 👍/👎 vote constants + callback-token scheme
+│   ├── personas.py              # /start persona A/B test variants
 │   ├── models.py               # Job, UserProfile
 │   ├── config.py                # env var loading
 │   ├── sources/                 # one module per source type

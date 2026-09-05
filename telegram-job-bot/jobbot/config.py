@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -21,6 +22,7 @@ class Settings:
     db_path: str
     sources_config_path: str
     http_timeout_seconds: float
+    admin_chat_id: Optional[int]
 
     @property
     def llm_enabled(self) -> bool:
@@ -28,6 +30,7 @@ class Settings:
 
 
 def load_settings() -> Settings:
+    admin_chat_id_raw = os.getenv("ADMIN_CHAT_ID", "").strip()
     return Settings(
         telegram_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
@@ -37,6 +40,7 @@ def load_settings() -> Settings:
         db_path=os.getenv("JOBBOT_DB_PATH", str(BASE_DIR / "data" / "jobbot.sqlite3")),
         sources_config_path=os.getenv("JOBBOT_SOURCES_PATH", str(BASE_DIR / "sources.yaml")),
         http_timeout_seconds=float(os.getenv("HTTP_TIMEOUT_SECONDS", "20")),
+        admin_chat_id=int(admin_chat_id_raw) if admin_chat_id_raw else None,
     )
 
 
